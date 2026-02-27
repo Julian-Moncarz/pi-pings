@@ -36,6 +36,18 @@ export default function (pi: ExtensionAPI) {
 	let watcher: fs.FSWatcher | undefined;
 	let shuttingDown = false;
 
+	function deliver(msg: string) {
+		try {
+			pi.sendUserMessage(msg, { deliverAs: "followUp" });
+		} catch {
+			try {
+				pi.sendUserMessage(msg);
+			} catch (e) {
+				console.error(`[pings] Failed to deliver:`, e);
+			}
+		}
+	}
+
 	function startPing(scriptPath: string) {
 		const name = path.basename(scriptPath);
 
@@ -56,20 +68,10 @@ export default function (pi: ExtensionAPI) {
 			rl.on("line", (line) => {
 				const trimmed = line.trim();
 				if (!trimmed) return;
-				const msg = `[PING:${name}] ${trimmed}`;
-				try {
-					pi.sendUserMessage(msg, { deliverAs: "followUp" });
-				} catch {
-					// Agent might be idle — send without deliverAs
-					try {
-						pi.sendUserMessage(msg);
-					} catch (e) {
-						console.error(`[pings] Failed to deliver message from ${name}:`, e);
-					}
-				}
+				deliver(`[PING:${name}] ${trimmed}`);
 			});
 
-			// Log stderr
+			// Collect stderr for error reporting
 			const stderrChunks: string[] = [];
 			proc.stderr?.on("data", (chunk: Buffer) => {
 				stderrChunks.push(chunk.toString());
@@ -80,20 +82,18 @@ export default function (pi: ExtensionAPI) {
 				running.delete(name);
 				if (shuttingDown) return;
 
-				if (code !== 0) {
+				if (code !== 0 && code !== null) {
 					const stderr = stderrChunks.join("").trim();
-					console.error(
-						`[pings] ${name} exited with code ${code}${stderr ? `: ${stderr}` : ""}`,
-					);
+					const detail = stderr ? `: ${stderr}` : "";
+					deliver(`[PING:${name}] exited with code ${code}${detail}`);
 				}
-
-				// Never auto-restart. Scripts that want to loop should loop internally.
-				// To restart a ping: modify or re-touch the script file.
 			});
 
 			proc.on("error", (err) => {
-				console.error(`[pings] Failed to spawn ${name}:`, err.message);
 				running.delete(name);
+				if (!shuttingDown) {
+					deliver(`[PING:${name}] failed to start: ${err.message}`);
+				}
 			});
 		} catch (err) {
 			console.error(`[pings] Error starting ${name}:`, err);
