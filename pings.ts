@@ -32,18 +32,9 @@ interface PingProcess {
 
 export default function (pi: ExtensionAPI) {
 	const running = new Map<string, PingProcess>();
-	const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	let pingsDir: string;
 	let watcher: fs.FSWatcher | undefined;
 	let shuttingDown = false;
-
-	function clearRestart(name: string) {
-		const timer = restartTimers.get(name);
-		if (timer) {
-			clearTimeout(timer);
-			restartTimers.delete(name);
-		}
-	}
 
 	function startPing(scriptPath: string) {
 		const name = path.basename(scriptPath);
@@ -86,34 +77,18 @@ export default function (pi: ExtensionAPI) {
 
 			proc.on("exit", (code) => {
 				entry.alive = false;
+				running.delete(name);
 				if (shuttingDown) return;
 
-				// Check if script still exists
-				if (!fs.existsSync(scriptPath)) {
-					running.delete(name);
-					return;
-				}
-
-				if (code === 0) {
-					// Restart after brief delay (prevents tight loops on instant-exit scripts)
-					restartTimers.set(
-						name,
-						setTimeout(() => {
-							restartTimers.delete(name);
-							if (!shuttingDown && fs.existsSync(scriptPath)) {
-								startPing(scriptPath);
-							} else {
-								running.delete(name);
-							}
-						}, 500),
-					);
-				} else {
-					running.delete(name);
+				if (code !== 0) {
 					const stderr = stderrChunks.join("").trim();
 					console.error(
 						`[pings] ${name} exited with code ${code}${stderr ? `: ${stderr}` : ""}`,
 					);
 				}
+
+				// Never auto-restart. Scripts that want to loop should loop internally.
+				// To restart a ping: modify or re-touch the script file.
 			});
 
 			proc.on("error", (err) => {
@@ -126,7 +101,6 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function stopPing(name: string) {
-		clearRestart(name);
 		const entry = running.get(name);
 		if (!entry) return;
 		if (entry.alive) {
@@ -201,9 +175,6 @@ export default function (pi: ExtensionAPI) {
 		shuttingDown = true;
 		if (syncTimer) clearTimeout(syncTimer);
 		watcher?.close();
-		for (const name of [...restartTimers.keys()]) {
-			clearRestart(name);
-		}
 		for (const name of [...running.keys()]) {
 			stopPing(name);
 		}
