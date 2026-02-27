@@ -27,14 +27,23 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 interface PingProcess {
 	proc: ChildProcess;
 	scriptPath: string;
-	restartTimer?: ReturnType<typeof setTimeout>;
+	alive: boolean;
 }
 
 export default function (pi: ExtensionAPI) {
 	const running = new Map<string, PingProcess>();
+	const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	let pingsDir: string;
 	let watcher: fs.FSWatcher | undefined;
 	let shuttingDown = false;
+
+	function clearRestart(name: string) {
+		const timer = restartTimers.get(name);
+		if (timer) {
+			clearTimeout(timer);
+			restartTimers.delete(name);
+		}
+	}
 
 	function startPing(scriptPath: string) {
 		const name = path.basename(scriptPath);
@@ -48,7 +57,7 @@ export default function (pi: ExtensionAPI) {
 				env: { ...process.env },
 			});
 
-			const entry: PingProcess = { proc, scriptPath };
+			const entry: PingProcess = { proc, scriptPath, alive: true };
 			running.set(name, entry);
 
 			// Read stdout line by line — each line is a ping event
@@ -76,20 +85,30 @@ export default function (pi: ExtensionAPI) {
 			});
 
 			proc.on("exit", (code) => {
-				running.delete(name);
+				entry.alive = false;
 				if (shuttingDown) return;
 
 				// Check if script still exists
-				if (!fs.existsSync(scriptPath)) return;
+				if (!fs.existsSync(scriptPath)) {
+					running.delete(name);
+					return;
+				}
 
 				if (code === 0) {
 					// Restart after brief delay (prevents tight loops on instant-exit scripts)
-					entry.restartTimer = setTimeout(() => {
-						if (!shuttingDown && fs.existsSync(scriptPath)) {
-							startPing(scriptPath);
-						}
-					}, 500);
+					restartTimers.set(
+						name,
+						setTimeout(() => {
+							restartTimers.delete(name);
+							if (!shuttingDown && fs.existsSync(scriptPath)) {
+								startPing(scriptPath);
+							} else {
+								running.delete(name);
+							}
+						}, 500),
+					);
 				} else {
+					running.delete(name);
 					const stderr = stderrChunks.join("").trim();
 					console.error(
 						`[pings] ${name} exited with code ${code}${stderr ? `: ${stderr}` : ""}`,
@@ -107,13 +126,15 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function stopPing(name: string) {
+		clearRestart(name);
 		const entry = running.get(name);
 		if (!entry) return;
-		if (entry.restartTimer) clearTimeout(entry.restartTimer);
-		try {
-			entry.proc.kill("SIGTERM");
-		} catch {
-			// already dead
+		if (entry.alive) {
+			try {
+				entry.proc.kill("SIGTERM");
+			} catch {
+				// already dead
+			}
 		}
 		running.delete(name);
 	}
@@ -180,6 +201,9 @@ export default function (pi: ExtensionAPI) {
 		shuttingDown = true;
 		if (syncTimer) clearTimeout(syncTimer);
 		watcher?.close();
+		for (const name of [...restartTimers.keys()]) {
+			clearRestart(name);
+		}
 		for (const name of [...running.keys()]) {
 			stopPing(name);
 		}
