@@ -38,7 +38,7 @@ export default function (pi: ExtensionAPI) {
 
 	function deliver(msg: string) {
 		try {
-			pi.sendUserMessage(msg, { deliverAs: "followUp" });
+			pi.sendUserMessage(msg, { deliverAs: "followUp", triggerTurn: true });
 		} catch {
 			try {
 				pi.sendUserMessage(msg);
